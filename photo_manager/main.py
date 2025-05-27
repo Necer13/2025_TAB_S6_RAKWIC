@@ -3,7 +3,7 @@ from tkinter import messagebox
 import hashlib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from orm import Base, User  # Assuming User model is defined in orm.py
+from orm import Base, User, Photo  # Assuming User model is defined in orm.py
 
 # Global session factory
 Session = None
@@ -29,6 +29,46 @@ def edit_item(name):
 
 def save_item(name):
     messagebox.showinfo("Saved", f"Changes saved: {name}")
+
+def search_photos(search_term):
+    """Query the database for photos matching the search term in the path or author."""
+    session = Session()
+    try:
+        results = (
+            session.query(Photo)
+            .filter(
+                (Photo.path.ilike(f"%{search_term}%")) |
+                (Photo.author.ilike(f"%{search_term}%"))
+            )
+            .all()
+        )
+        return results
+    finally:
+        session.close()
+
+def update_gallery(gallery_frame, photos):
+    """Clear and update the gallery with the given photos."""
+    for widget in gallery_frame.winfo_children():
+        widget.destroy()
+    for photo in photos:
+        card = tk.Frame(gallery_frame, bd=1, relief=tk.RIDGE, padx=10, pady=10)
+        card.pack(side=tk.LEFT, padx=10, pady=10)
+
+        placeholder = tk.Label(card, text="250x180", width=25, height=6, bg="gray80")
+        placeholder.pack()
+
+        title = tk.Label(card, text=photo.path, font=("Arial", 12, "bold"))
+        title.pack(pady=(10, 0))
+
+        description = tk.Label(card, text=f"Author: {photo.author}", wraplength=200, justify="center")
+        description.pack()
+
+        edit_btn = tk.Button(card, text="Edit", command=lambda n=photo.path: edit_item(n))
+        edit_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        save_btn = tk.Button(card, text="Save", command=lambda n=photo.path: save_item(n))
+        save_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
 
 
 def open_main_window(username):
@@ -69,40 +109,29 @@ def open_main_window(username):
     search_entry = tk.Entry(search_frame, width=40)
     search_entry.insert(0, "Search photos...")
     search_entry.pack(side=tk.LEFT, padx=5)
+    search_entry.bind("<FocusIn>", lambda e: search_entry.delete(0, tk.END) if search_entry.get() == "Search photos..." else None)
+    search_entry.bind("<FocusOut>", lambda e: search_entry.insert(0, "Search photos...") if not search_entry.get() else None)
+    search_entry.bind("<Return>", lambda e: on_search())
+    def on_search():
+        term = search_entry.get().strip()
+        results = search_photos(term)
+        update_gallery(gallery, results)
 
-    search_button = tk.Button(search_frame, text="Search")
+    search_button = tk.Button(search_frame, text="Search", command=on_search)
     search_button.pack(side=tk.LEFT)
-
     # Gallery
     gallery = tk.Frame(main_window)
     gallery.pack()
-
-    photo_data = [
-        ("Sunset over the lake", "A beautiful sunset captured over Lake Sniardwy."),
-        ("Tatra Mountains", "View of the Tatra Mountains from Kasprowy Wierch."),
-        ("Warsaw Old Town", "Colorful townhouses in Warsaw's Old Town."),
-        ("Baltic Sea at sunrise", "Baltic Sea at sunrise in Kolobrzeg."),
-    ]
-
-    for name, desc in photo_data:
-        card = tk.Frame(gallery, bd=1, relief=tk.RIDGE, padx=10, pady=10)
-        card.pack(side=tk.LEFT, padx=10, pady=10)
-
-        placeholder = tk.Label(card, text="250x180", width=25, height=6, bg="gray80")
-        placeholder.pack()
-
-        title = tk.Label(card, text=name, font=("Arial", 12, "bold"))
-        title.pack(pady=(10, 0))
-
-        description = tk.Label(card, text=desc, wraplength=200, justify="center")
-        description.pack()
-
-        edit_btn = tk.Button(card, text="Edit", command=lambda n=name: edit_item(n))
-        edit_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-        save_btn = tk.Button(card, text="Save", command=lambda n=name: save_item(n))
-        save_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
+    
+    session = Session()
+    try:
+        all_photos = session.query(Photo).all()
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred while fetching photos: {str(e)}")
+        all_photos = []
+    finally:
+        session.close()
+    update_gallery(gallery, all_photos)
     # Footer
     footer = tk.Label(
         main_window,
@@ -230,5 +259,8 @@ register_btn = tk.Button(
     command=register,
 )
 register_btn.pack(side="right", padx=5)
+
+
+
 
 root.mainloop()
