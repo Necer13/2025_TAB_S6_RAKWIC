@@ -1,5 +1,7 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, simpledialog, messagebox
+from PIL import Image, ImageTk
+import os
 import hashlib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -46,18 +48,82 @@ def search_photos(search_term):
     finally:
         session.close()
 
+def add_photo(gallery_frame):
+    file_path = filedialog.askopenfilename(
+        title="Select a photo",
+        filetypes=[("Image Files", "*.jpg *.jpeg *.png *.gif *.bmp")]
+    )
+    if not file_path:
+        return
+
+    try:
+        img = Image.open(file_path)
+        size = os.path.getsize(file_path)
+        resolution_width, resolution_height = img.size
+    except Exception as e:
+        messagebox.showerror("Error", f"Nie udało się odczytać obrazu: {str(e)}")
+        return
+
+    author = simpledialog.askstring("Author", "Enter author name:")
+    if not author:
+        return
+
+    exif_data = {}
+
+    session = Session()
+    try:
+        new_photo = Photo(
+            path=file_path,
+            author=author,
+            attr_size=size,
+            resolution_width=resolution_width,
+            resolution_height=resolution_height,
+            exif=exif_data,
+        )
+        session.add(new_photo)
+        session.commit()
+        messagebox.showinfo("Success", "Photo added successfully.")
+        photos = session.query(Photo).all()
+        update_gallery(gallery_frame, photos)
+    except Exception as e:
+        session.rollback()
+        messagebox.showerror("Error", f"An error occurred while adding photo: {str(e)}")
+    finally:
+        session.close()
+
 def update_gallery(gallery_frame, photos):
-    """Clear and update the gallery with the given photos."""
     for widget in gallery_frame.winfo_children():
         widget.destroy()
-    for photo in photos:
+
+    gallery_frame.image_refs = []
+
+    max_columns = 3  # maksymalna liczba zdjęć w wierszu (dostosuj według potrzeb)
+    col = 0
+    row = 0
+
+    for idx, photo in enumerate(photos):
         card = tk.Frame(gallery_frame, bd=1, relief=tk.RIDGE, padx=10, pady=10)
-        card.pack(side=tk.LEFT, padx=10, pady=10)
+        card.grid(row=row, column=col, padx=10, pady=10, sticky="n")
 
-        placeholder = tk.Label(card, text="250x180", width=25, height=6, bg="gray80")
-        placeholder.pack()
+        try:
+            img = Image.open(photo.path)
+            img.thumbnail((250, 180))
+            img_tk = ImageTk.PhotoImage(img)
+        except Exception as e:
+            img_tk = None
+        
+        if img_tk:
+            img_label = tk.Label(card, image=img_tk)
+            img_label.image = img_tk
+            img_label.pack()
+            gallery_frame.image_refs.append(img_tk)
+        else:
+            placeholder = tk.Label(card, text="No preview", width=25, height=6, bg="gray80")
+            placeholder.pack()
 
-        title = tk.Label(card, text=photo.path, font=("Arial", 12, "bold"))
+        file_name_only = os.path.basename(photo.path)
+
+        title = tk.Label(card, text=file_name_only, font=("Arial", 12, "bold"))
         title.pack(pady=(10, 0))
 
         description = tk.Label(card, text=f"Author: {photo.author}", wraplength=200, justify="center")
@@ -68,6 +134,11 @@ def update_gallery(gallery_frame, photos):
 
         save_btn = tk.Button(card, text="Save", command=lambda n=photo.path: save_item(n))
         save_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        col += 1
+        if col >= max_columns:
+            col = 0
+            row += 1
 
 
 
@@ -93,15 +164,6 @@ def open_main_window(username):
     # Add/Report buttons
     top_frame = tk.Frame(main_window)
     top_frame.pack()
-
-    add_button = tk.Button(top_frame, text="Add Photo", bg="lightblue", padx=10)
-    add_button.pack(side=tk.LEFT, padx=10, pady=10)
-
-    report_button = tk.Button(
-        top_frame, text="Generate Report", bg="lightblue", padx=10
-    )
-    report_button.pack(side=tk.LEFT)
-
     # Search bar
     search_frame = tk.Frame(main_window)
     search_frame.pack(pady=20)
@@ -111,18 +173,49 @@ def open_main_window(username):
     search_entry.pack(side=tk.LEFT, padx=5)
     search_entry.bind("<FocusIn>", lambda e: search_entry.delete(0, tk.END) if search_entry.get() == "Search photos..." else None)
     search_entry.bind("<FocusOut>", lambda e: search_entry.insert(0, "Search photos...") if not search_entry.get() else None)
-    search_entry.bind("<Return>", lambda e: on_search())
+
     def on_search():
         term = search_entry.get().strip()
         results = search_photos(term)
         update_gallery(gallery, results)
 
+    search_entry.bind("<Return>", lambda e: on_search())
     search_button = tk.Button(search_frame, text="Search", command=on_search)
     search_button.pack(side=tk.LEFT)
-    # Gallery
-    gallery = tk.Frame(main_window)
-    gallery.pack()
-    
+
+    # Tu będzie gallery, ale jeszcze go nie ma, więc zdefiniujmy container dla galerii najpierw
+
+    # Kontener z canvas i scrollbar
+    container = tk.Frame(main_window)
+    container.pack(fill="both", expand=True, padx=10, pady=10)
+
+    canvas = tk.Canvas(container, bg="#f5f5f5")
+    scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    # Frame, w którym będą zdjęcia
+    gallery = tk.Frame(canvas, bg="#f5f5f5")
+    canvas.create_window((0, 0), window=gallery, anchor="nw")
+
+    # Funkcja aktualizująca obszar scrollowania przy zmianie rozmiaru gallery
+    def on_frame_configure(event):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    gallery.bind("<Configure>", on_frame_configure)
+
+    add_button = tk.Button(top_frame, text="Add Photo", bg="lightblue", padx=10, command=lambda: add_photo(gallery))
+    add_button.pack(side=tk.LEFT, padx=10, pady=10)
+
+    report_button = tk.Button(
+        top_frame, text="Generate Report", bg="lightblue", padx=10
+    )
+    report_button.pack(side=tk.LEFT)
+
+
+    # Załaduj zdjęcia z bazy i pokaż w galerii
     session = Session()
     try:
         all_photos = session.query(Photo).all()
@@ -132,6 +225,7 @@ def open_main_window(username):
     finally:
         session.close()
     update_gallery(gallery, all_photos)
+
     # Footer
     footer = tk.Label(
         main_window,
@@ -141,6 +235,9 @@ def open_main_window(username):
         height=2,
     )
     footer.pack(fill=tk.X, side=tk.BOTTOM)
+
+    main_window.mainloop()
+
 
 
 def login():
