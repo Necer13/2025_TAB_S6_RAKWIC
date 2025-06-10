@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, simpledialog, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, JpegImagePlugin
 import os
 import hashlib
 import piexif
@@ -8,7 +8,7 @@ import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from orm import Base, User, Photo  # Assuming User model is defined in orm.py
-
+JpegImagePlugin._getmp = lambda: None
 # Global session factory
 Session = None
 
@@ -103,6 +103,7 @@ def add_photo(gallery_frame):
             exif_data = {}
         size = os.path.getsize(file_path)
         resolution_width, resolution_height = img.size
+        image_type = img.format
     except Exception as e:
         messagebox.showerror("Error", f"Nie udało się odczytać obrazu: {str(e)}")
         return
@@ -131,6 +132,7 @@ def add_photo(gallery_frame):
             exif=exif_data,
             date_of_creation=date_of_creation,
             date_of_archivisation=datetime.datetime.now(),
+            type=image_type
         )
         session.add(new_photo)
         session.commit()
