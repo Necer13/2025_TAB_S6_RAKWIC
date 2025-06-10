@@ -3,6 +3,8 @@ from tkinter import filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk
 import os
 import hashlib
+import piexif
+import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from orm import Base, User, Photo  # Assuming User model is defined in orm.py
@@ -89,22 +91,30 @@ def add_photo(gallery_frame):
     )
     if not file_path:
         return
-
+    author = None
     try:
         img = Image.open(file_path)
+        if "exif" in img.info:
+            exif_data = piexif.load(img.info["exif"])
+            if piexif.ImageIFD.Artist in exif_data["0th"]:
+                author = exif_data["0th"][piexif.ImageIFD.Artist].decode('utf-8')
+                print(f"Autor: {author}")
+        else:
+            exif_data = {}
         size = os.path.getsize(file_path)
         resolution_width, resolution_height = img.size
     except Exception as e:
         messagebox.showerror("Error", f"Nie udało się odczytać obrazu: {str(e)}")
         return
-
-    author = simpledialog.askstring("Author", "Enter author name:")
-    if not author:
-        return
-
+    try:
+        if piexif.ImageIFD.DateTime in exif_data["0th"]:
+            date_of_creation = exif_data["0th"][piexif.ImageIFD.DateTime].decode('utf-8')
+    except KeyError:
+        date_of_creation = None
     exif_data = {}
-
     session = Session()
+    if not author:
+        author = None
     try:
         new_photo = Photo(
             path=file_path,
@@ -113,6 +123,8 @@ def add_photo(gallery_frame):
             resolution_width=resolution_width,
             resolution_height=resolution_height,
             exif=exif_data,
+            date_of_creation=date_of_creation,
+            date_of_archivisation=datetime.datetime.now(),
         )
         session.add(new_photo)
         session.commit()
@@ -182,7 +194,7 @@ def open_main_window(username):
     root.destroy()
     main_window = tk.Tk()
     main_window.title("Photo Collection Management System")
-    main_window.geometry("900x600")
+    main_window.geometry("1200x800")
     main_window.configure(bg="#f5f5f5")
 
     header = tk.Frame(main_window, bg="#2c3e50", height=60)
