@@ -107,10 +107,16 @@ def add_photo(gallery_frame):
         messagebox.showerror("Error", f"Nie udało się odczytać obrazu: {str(e)}")
         return
     try:
-        if piexif.ImageIFD.DateTime in exif_data["0th"]:
-            date_of_creation = exif_data["0th"][piexif.ImageIFD.DateTime].decode('utf-8')
-    except KeyError:
+        date_of_creation_str = exif_data.get("0th", {}).get(piexif.ImageIFD.DateTime, None)
+        if date_of_creation_str:
+            date_of_creation_str = date_of_creation_str.decode('utf-8')
+            date_of_creation = datetime.datetime.strptime(date_of_creation_str, "%Y:%m:%d %H:%M:%S")
+        else:
+            date_of_creation = None
+    except Exception as e:
         date_of_creation = None
+    
+    print(exif_data)
     exif_data = {}
     session = Session()
     if not author:
