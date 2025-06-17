@@ -60,8 +60,88 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-def edit_item(name):
-    messagebox.showinfo("Edit", f"Editing: {name}")
+def edit_photo(photo_id, gallery_frame):
+    session = Session()
+    try:
+        photo = session.query(Photo).get(photo_id)
+        if not photo:
+            messagebox.showerror("Error", "Photo not found.")
+            return
+
+        # Okno dialogowe do edycji
+        edit_win = tk.Toplevel()
+        edit_win.title("Edit Photo Details")
+
+        fields = {
+            "Path": photo.path,
+            "Author": photo.author if photo.author else "",
+            "Size (bytes)": photo.attr_size if photo.attr_size else "",
+            "Resolution Width": photo.resolution_width if photo.resolution_width else "",
+            "Resolution Height": photo.resolution_height if photo.resolution_height else "",
+            "Type": photo.type if photo.type else "",
+            "Date of Creation (YYYY-MM-DD HH:MM:SS)": photo.date_of_creation.strftime("%Y-%m-%d %H:%M:%S") if photo.date_of_creation else "",
+            "Date of Archivisation (YYYY-MM-DD HH:MM:SS)": photo.date_of_archivisation.strftime("%Y-%m-%d %H:%M:%S") if photo.date_of_archivisation else "",
+            "EXIF (JSON string)": photo.exif if photo.exif else "{}",
+        }
+
+        entries = {}
+
+        for idx, (label_text, value) in enumerate(fields.items()):
+            lbl = tk.Label(edit_win, text=label_text)
+            lbl.grid(row=idx, column=0, sticky="w", padx=5, pady=5)
+            ent = tk.Entry(edit_win, width=50)
+            ent.grid(row=idx, column=1, padx=5, pady=5)
+            ent.insert(0, str(value))
+            entries[label_text] = ent
+
+        def save_changes():
+            try:
+                photo.path = entries["Path"].get()
+                photo.author = entries["Author"].get() or None
+                photo.attr_size = int(entries["Size (bytes)"].get()) if entries["Size (bytes)"].get() else None
+                photo.resolution_width = int(entries["Resolution Width"].get()) if entries["Resolution Width"].get() else None
+                photo.resolution_height = int(entries["Resolution Height"].get()) if entries["Resolution Height"].get() else None
+                photo.type = entries["Type"].get() or None
+
+                # Parsowanie dat
+                def parse_date(dt_str):
+                    if not dt_str.strip():
+                        return None
+                    try:
+                        return datetime.datetime.strptime(dt_str.strip(), "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        messagebox.showerror("Error", f"Invalid date format: {dt_str}")
+                        return None
+
+                photo.date_of_creation = parse_date(entries["Date of Creation (YYYY-MM-DD HH:MM:SS)"].get())
+                photo.date_of_archivisation = parse_date(entries["Date of Archivisation (YYYY-MM-DD HH:MM:SS)"].get())
+
+                # Parsowanie EXIF JSON
+                import json
+                exif_text = entries["EXIF (JSON string)"].get()
+                if exif_text.strip():
+                    photo.exif = json.loads(exif_text)
+                else:
+                    photo.exif = {}
+
+                session.commit()
+                messagebox.showinfo("Success", "Photo updated successfully.")
+                edit_win.destroy()
+
+                # Odśwież galerię
+                photos = session.query(Photo).all()
+                update_gallery(gallery_frame, photos)
+
+            except Exception as e:
+                session.rollback()
+                messagebox.showerror("Error", f"Failed to save changes: {str(e)}")
+
+        btn_save = tk.Button(edit_win, text="Save Changes", command=save_changes)
+        btn_save.grid(row=len(fields), column=0, columnspan=2, pady=10)
+
+    finally:
+        session.close()
+
 
 
 def save_item(name):
@@ -184,7 +264,7 @@ def update_gallery(gallery_frame, photos):
         description = tk.Label(card, text=f"Author: {photo.author}", wraplength=200, justify="center")
         description.pack()
 
-        edit_btn = tk.Button(card, text="Edit", command=lambda n=photo.path: edit_item(n))
+        edit_btn = tk.Button(card, text="Edit", command=lambda p_id=photo.id: edit_photo(p_id, gallery_frame))
         edit_btn.pack(side=tk.LEFT, padx=5, pady=5)
         ToolTip(edit_btn, "Edit this photo's details")
 
