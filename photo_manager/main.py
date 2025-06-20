@@ -8,6 +8,7 @@ import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from orm import Base, User, Photo  # Assuming User model is defined in orm.py
+from fpdf import FPDF
 JpegImagePlugin._getmp = lambda: None
 # Global session factory
 Session = None
@@ -231,9 +232,11 @@ def update_gallery(gallery_frame, photos):
         widget.destroy()
 
     gallery_frame.image_refs = []
+    gallery_frame.visible_photos = photos
     max_columns = 3
     col = 0
     row = 0
+    
 
     for idx, photo in enumerate(photos):
         card = tk.Frame(gallery_frame, bd=1, relief=tk.RIDGE, padx=10, pady=10)
@@ -276,6 +279,52 @@ def update_gallery(gallery_frame, photos):
         if col >= max_columns:
             col = 0
             row += 1
+
+
+def generate_report(gallery_frame):
+
+    photos = getattr(gallery_frame, "visible_photos", [])
+    if not photos:
+        messagebox.showwarning("No Photos", "There are no photos to include in the report.")
+        return
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.add_font("ArialUnicode", "", "arial.ttf", uni=True)
+    pdf.set_font("ArialUnicode", size=12)
+
+    pdf.cell(200, 10, txt="Photo Collection Report", ln=True, align='C')
+    pdf.ln(10)
+
+    for photo in photos:
+        try:
+            img = Image.open(photo.path)
+            img.thumbnail((150, 150))
+            thumb_path = f"temp_thumb_{photo.id}.jpg"
+            img.save(thumb_path)
+
+            pdf.image(thumb_path, w=60)
+            os.remove(thumb_path)
+        except Exception as e:
+            pdf.cell(0, 10, txt=f"[Could not load image: {e}]", ln=True)
+
+        pdf.cell(0, 10, f"Path: {photo.path}", ln=True)
+        pdf.cell(0, 10, f"Author: {photo.author if photo.author else 'N/A'}", ln=True)
+        pdf.cell(0, 10, f"Size: {photo.attr_size} bytes", ln=True)
+        pdf.cell(0, 10, f"Resolution: {photo.resolution_width}x{photo.resolution_height}", ln=True)
+        pdf.cell(0, 10, f"Type: {photo.type if photo.type else 'N/A'}", ln=True)
+        pdf.cell(0, 10, f"Date of Creation: {photo.date_of_creation.strftime('%Y-%m-%d %H:%M:%S') if photo.date_of_creation else 'N/A'}", ln=True)
+        pdf.cell(0, 10, f"Date of Archivisation: {photo.date_of_archivisation.strftime('%Y-%m-%d %H:%M:%S') if photo.date_of_archivisation else 'N/A'}", ln=True)
+        pdf.ln(10)
+
+    output_path = "photo_collection_report.pdf"
+    pdf.output(output_path)
+    messagebox.showinfo("Report Generated", f"Report saved as {output_path}")
+
+
+
 
 
 def open_main_window(username):
@@ -343,7 +392,7 @@ def open_main_window(username):
     add_button.pack(side=tk.LEFT, padx=10, pady=10)
     ToolTip(add_button, "Click to add a new photo to your collection.")
 
-    report_button = tk.Button(top_frame, text="Generate Report", bg="lightblue", padx=10)
+    report_button = tk.Button(top_frame, text="Generate Report", bg="lightblue", padx=10, command=lambda: generate_report(gallery))
     report_button.pack(side=tk.LEFT)
     ToolTip(report_button, "Generate a report of all saved photos.")
 
