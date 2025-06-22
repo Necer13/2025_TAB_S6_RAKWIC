@@ -6,8 +6,8 @@ import hashlib
 import piexif
 import datetime
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from orm import Base, User, Photo  # Assuming User model is defined in orm.py
+from sqlalchemy.orm import sessionmaker, selectinload
+from orm import Base, User, Photo, Tag
 from fpdf import FPDF
 import json
 JpegImagePlugin._getmp = lambda: None
@@ -84,6 +84,7 @@ def edit_photo(photo_id, gallery_frame):
         "Date of Creation (YYYY-MM-DD HH:MM:SS)": photo.date_of_creation.strftime("%Y-%m-%d %H:%M:%S") if photo.date_of_creation else "",
         "Date of Archivisation (YYYY-MM-DD HH:MM:SS)": photo.date_of_archivisation.strftime("%Y-%m-%d %H:%M:%S") if photo.date_of_archivisation else "",
         "EXIF (JSON string)": json.dumps(photo.exif) if photo.exif else "{}",
+        "Tags (comma-separated)": ", ".join([tag.name for tag in photo.tags]),
     }
 
     entries = {}
@@ -124,12 +125,25 @@ def edit_photo(photo_id, gallery_frame):
             else:
                 photo.exif = {}
 
+            # Handle tags
+            tag_names_str = entries["Tags (comma-separated)"].get().strip()
+            new_tag_names = [name.strip() for name in tag_names_str.split(',') if name.strip()]
+
+            # Clear existing tags and re-add
+            photo.tags.clear()
+            for tag_name in new_tag_names:
+                # Try to find existing tag
+                tag = session.query(Tag).filter_by(name=tag_name).first()
+                if not tag:
+                    # If not found, create new tag
+                    tag = Tag(name=tag_name)
+                    session.add(tag) # Add new tag to session
+                photo.tags.append(tag) # Associate tag with photo
             session.commit()
-            messagebox.showinfo("Success", "Photo updated successfully.")
             edit_win.destroy()
 
             # Odśwież galerię
-            photos = session.query(Photo).all()
+            photos = session.query(Photo).options(selectinload(Photo.tags)).all()
             update_gallery(gallery_frame, photos)
 
         except Exception as e:
@@ -155,9 +169,11 @@ def search_photos(search_term):
     try:
         results = (
             session.query(Photo)
+            .options(selectinload(Photo.tags))
             .filter(
                 (Photo.path.ilike(f"%{search_term}%")) |
-                (Photo.author.ilike(f"%{search_term}%"))
+                (Photo.author.ilike(f"%{search_term}%")) |
+                (Photo.tags.any(Tag.name.ilike(f"%{search_term}%")))
             )
             .all()
         )
@@ -219,7 +235,7 @@ def add_photo(gallery_frame):
         session.add(new_photo)
         session.commit()
         messagebox.showinfo("Success", "Photo added successfully.")
-        photos = session.query(Photo).all()
+        photos = session.query(Photo).options(selectinload(Photo.tags)).all()
         update_gallery(gallery_frame, photos)
     except Exception as e:
         session.rollback()
@@ -267,6 +283,11 @@ def update_gallery(gallery_frame, photos):
         title.pack(pady=(10, 0))
         description = tk.Label(card, text=f"Author: {photo.author}", wraplength=200, justify="center")
         description.pack()
+        
+        tags_text = ", ".join([tag.name for tag in photo.tags])
+        if tags_text:
+            tags_label = tk.Label(card, text=f"Tags: {tags_text}", wraplength=200, justify="center", fg="blue")
+            tags_label.pack()
 
         edit_btn = tk.Button(card, text="Edit", command=lambda p_id=photo.id: edit_photo(p_id, gallery_frame))
         edit_btn.pack(side=tk.LEFT, padx=5, pady=5)
@@ -399,7 +420,7 @@ def open_main_window(username):
 
     session = Session()
     try:
-        all_photos = session.query(Photo).all()
+        all_photos = session.query(Photo).options(selectinload(Photo.tags)).all()
     except Exception as e:
         messagebox.showerror("Error", f"An error occurred while fetching photos: {str(e)}")
         all_photos = []
