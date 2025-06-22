@@ -62,7 +62,7 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-def edit_photo(photo_id, gallery_frame):
+def edit_photo(photo_id, gallery_frame, display_names_var):
     edit_win = tk.Toplevel()
     edit_win.title("Edit Photo Details")
 
@@ -88,6 +88,7 @@ def edit_photo(photo_id, gallery_frame):
     }
 
     entries = {}
+    readonly_fields = ["Size (bytes)", "Resolution Width", "Resolution Height"]
 
     for idx, (label_text, value) in enumerate(fields.items()):
         lbl = tk.Label(edit_win, text=label_text)
@@ -95,15 +96,14 @@ def edit_photo(photo_id, gallery_frame):
         ent = tk.Entry(edit_win, width=50)
         ent.grid(row=idx, column=1, padx=5, pady=5)
         ent.insert(0, str(value))
+        if label_text in readonly_fields:
+            ent.config(state='readonly')
         entries[label_text] = ent
 
     def save_changes():
         try:
             photo.path = entries["Path"].get().strip()
             photo.author = entries["Author"].get().strip() or None
-            photo.attr_size = int(entries["Size (bytes)"].get()) if entries["Size (bytes)"].get().strip() else None
-            photo.resolution_width = int(entries["Resolution Width"].get()) if entries["Resolution Width"].get().strip() else None
-            photo.resolution_height = int(entries["Resolution Height"].get()) if entries["Resolution Height"].get().strip() else None
             photo.type = entries["Type"].get().strip() or None
 
             def parse_date(dt_str):
@@ -144,7 +144,7 @@ def edit_photo(photo_id, gallery_frame):
 
             # Odśwież galerię
             photos = session.query(Photo).options(selectinload(Photo.tags)).all()
-            update_gallery(gallery_frame, photos)
+            update_gallery(gallery_frame, photos, display_names_var, gallery_frame.last_num_columns)
 
         except Exception as e:
             session.rollback()
@@ -160,8 +160,27 @@ def edit_photo(photo_id, gallery_frame):
 
     edit_win.protocol("WM_DELETE_WINDOW", on_close)
 
+def delete_photo(photo_id, gallery_frame, display_names_var):
+    if not messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this photo? This action cannot be undone."):
+        return
+
+    session = Session()
+    try:
+        photo_to_delete = session.get(Photo, photo_id)
+        if photo_to_delete:
+            session.delete(photo_to_delete)
+            session.commit()
+            # Refresh the gallery
+            photos = session.query(Photo).options(selectinload(Photo.tags)).all()
+            update_gallery(gallery_frame, photos, display_names_var, gallery_frame.last_num_columns)
+    except Exception as e:
+        session.rollback()
+        messagebox.showerror("Error", f"Failed to delete photo: {str(e)}")
+    finally:
+        session.close()
+
 def save_item(name):
-    messagebox.showinfo("Saved", f"Changes saved: {name}")
+    pass # This function seems to be a placeholder and not used for actual saving.
 
 
 def search_photos(search_term):
@@ -182,7 +201,7 @@ def search_photos(search_term):
         session.close()
 
 
-def add_photo(gallery_frame):
+def add_photo(gallery_frame, display_names_var):
     file_path = filedialog.askopenfilename(
         title="Select a photo",
         filetypes=[("Image Files", "*.jpg *.jpeg *.png *.gif *.bmp")]
@@ -234,9 +253,8 @@ def add_photo(gallery_frame):
         )
         session.add(new_photo)
         session.commit()
-        messagebox.showinfo("Success", "Photo added successfully.")
         photos = session.query(Photo).options(selectinload(Photo.tags)).all()
-        update_gallery(gallery_frame, photos)
+        update_gallery(gallery_frame, photos, display_names_var, gallery_frame.last_num_columns)
     except Exception as e:
         session.rollback()
         messagebox.showerror("Error", f"An error occurred while adding photo: {str(e)}")
@@ -244,13 +262,13 @@ def add_photo(gallery_frame):
         session.close()
 
 
-def update_gallery(gallery_frame, photos):
+def update_gallery(gallery_frame, photos, display_names_var, max_columns):
     for widget in gallery_frame.winfo_children():
         widget.destroy()
 
     gallery_frame.image_refs = []
     gallery_frame.visible_photos = photos
-    max_columns = 3
+    gallery_frame.last_num_columns = max_columns
     col = 0
     row = 0
     
@@ -280,8 +298,9 @@ def update_gallery(gallery_frame, photos):
 
         file_name_only = os.path.basename(photo.path)
         title = tk.Label(card, text=file_name_only, font=("Arial", 12, "bold"))
-        title.pack(pady=(10, 0))
-        description = tk.Label(card, text=f"Author: {photo.author}", wraplength=200, justify="center")
+        if display_names_var.get(): # Conditionally pack the title label
+            title.pack(pady=(10, 0))
+        description = tk.Label(card, text=f"Author: {photo.author if photo.author else 'N/A'}", wraplength=200, justify="center")
         description.pack()
         
         tags_text = ", ".join([tag.name for tag in photo.tags])
@@ -289,13 +308,17 @@ def update_gallery(gallery_frame, photos):
             tags_label = tk.Label(card, text=f"Tags: {tags_text}", wraplength=200, justify="center", fg="blue")
             tags_label.pack()
 
-        edit_btn = tk.Button(card, text="Edit", command=lambda p_id=photo.id: edit_photo(p_id, gallery_frame))
-        edit_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        # Frame for buttons to align them left and right
+        button_frame = tk.Frame(card)
+        button_frame.pack(fill=tk.X, pady=5)
+
+        edit_btn = tk.Button(button_frame, text="Edit", command=lambda p_id=photo.id: edit_photo(p_id, gallery_frame, display_names_var))
+        edit_btn.pack(side=tk.LEFT)
         ToolTip(edit_btn, "Edit this photo's details")
 
-        save_btn = tk.Button(card, text="Save", command=lambda n=photo.path: save_item(n))
-        save_btn.pack(side=tk.LEFT, padx=5, pady=5)
-        ToolTip(save_btn, "Save changes made to this photo")
+        delete_btn = tk.Button(button_frame, text="Delete", bg="#e74c3c", fg="white", command=lambda p_id=photo.id: delete_photo(p_id, gallery_frame, display_names_var))
+        delete_btn.pack(side=tk.RIGHT)
+        ToolTip(delete_btn, "Delete this photo from the collection")
 
         col += 1
         if col >= max_columns:
@@ -384,7 +407,7 @@ def open_main_window(username):
     def on_search():
         term = search_entry.get().strip()
         results = search_photos(term)
-        update_gallery(gallery, results)
+        update_gallery(gallery, results, display_names_var, gallery.last_num_columns)
 
     search_entry.bind("<Return>", lambda e: on_search())
 
@@ -405,18 +428,41 @@ def open_main_window(username):
     gallery = tk.Frame(canvas, bg="#f5f5f5")
     canvas.create_window((0, 0), window=gallery, anchor="nw")
 
+    # This function handles the scroll region for the canvas
     def on_frame_configure(event):
         canvas.configure(scrollregion=canvas.bbox("all"))
-
     gallery.bind("<Configure>", on_frame_configure)
 
-    add_button = tk.Button(top_frame, text="Add Photo", bg="lightblue", padx=10, command=lambda: add_photo(gallery))
+    # This function handles the responsive layout when the canvas is resized
+    def on_canvas_configure(event):
+        canvas_width = event.width
+        # Estimate card width: image (250px) + card padx (20) + grid padx (20) + borders (~5) = ~295px
+        # Using a slightly larger value to ensure there's enough margin.
+        card_width_estimate = 300
+        num_columns = max(1, canvas_width // card_width_estimate)
+
+        # Redraw gallery only if the number of columns has changed
+        if getattr(gallery, 'last_num_columns', 0) != num_columns:
+            update_gallery(gallery, gallery.visible_photos, display_names_var, num_columns)
+    canvas.bind("<Configure>", on_canvas_configure)
+
+    add_button = tk.Button(top_frame, text="Add Photo", bg="lightblue", padx=10, command=lambda: add_photo(gallery, display_names_var))
     add_button.pack(side=tk.LEFT, padx=10, pady=10)
     ToolTip(add_button, "Click to add a new photo to your collection.")
 
     report_button = tk.Button(top_frame, text="Generate Report", bg="lightblue", padx=10, command=lambda: generate_report(gallery))
     report_button.pack(side=tk.LEFT)
     ToolTip(report_button, "Generate a report of all saved photos.")
+
+    # Checkbutton for displaying photo names
+    display_names_var = tk.BooleanVar(value=True) # Default to True (show names)
+    display_names_check = tk.Checkbutton(
+        top_frame,
+        text="Show Photo Names",
+        variable=display_names_var,
+        command=lambda: update_gallery(gallery, gallery.visible_photos, display_names_var, gallery.last_num_columns)
+    )
+    display_names_check.pack(side=tk.LEFT, padx=10, pady=10)
 
     session = Session()
     try:
@@ -425,8 +471,9 @@ def open_main_window(username):
         messagebox.showerror("Error", f"An error occurred while fetching photos: {str(e)}")
         all_photos = []
     finally:
-        session.close()
-    update_gallery(gallery, all_photos)
+        session.close() # Close session after fetching all photos
+    # Initial call with a default of 1 column, the <Configure> event will fix it immediately
+    update_gallery(gallery, all_photos, display_names_var, 1)
 
     footer = tk.Label(
         main_window,
