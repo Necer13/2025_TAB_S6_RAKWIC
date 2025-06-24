@@ -381,6 +381,8 @@ def update_gallery(gallery_frame, photos, display_names_var, max_columns):
         try:
             img = Image.open(photo.path)
             img.thumbnail((250, 180))
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
             img_tk = ImageTk.PhotoImage(img)
         except Exception:
             img_tk = None
@@ -513,7 +515,7 @@ def generate_report(gallery_frame):
         # Add EXIF data to the report
         if photo.exif:
             pdf.ln(5)
-            pdf.set_font("", "B", size=10)
+            pdf.set_font("", size=10)
             pdf.write(5, "EXIF Data:\n")
             pdf.set_font("", size=8)
             exif_str = json.dumps(photo.exif, indent=2)
