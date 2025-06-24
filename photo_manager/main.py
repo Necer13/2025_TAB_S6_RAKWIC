@@ -5,14 +5,17 @@ import os
 import hashlib
 import piexif
 import datetime
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, String
 from sqlalchemy.orm import sessionmaker, selectinload
 from orm import Base, User, Photo, Tag
 from fpdf import FPDF
 import json
+
 JpegImagePlugin._getmp = lambda: None
+
 # Global session factory
 Session = None
+
 
 # === Tooltip Helper ===
 class ToolTip:
@@ -39,7 +42,7 @@ class ToolTip:
             background="#ffffe0",
             relief=tk.SOLID,
             borderwidth=1,
-            font=("tahoma", "8", "normal")
+            font=("tahoma", "8", "normal"),
         )
         label.pack(ipadx=1)
 
@@ -56,6 +59,48 @@ def init_db():
     engine = create_engine("sqlite:///users.db")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
+
+
+def process_exif_for_db(exif_data):
+    """
+    Processes raw piexif data into a flat, JSON-serializable dictionary
+    with human-readable keys.
+    """
+    if not exif_data:
+        return {}
+
+    flat_exif = {}
+    # Iterate over all possible IFD sections
+    for ifd_name in ("0th", "Exif", "GPS", "1st"):
+        ifd_section = exif_data.get(ifd_name)
+        if not ifd_section:
+            continue
+
+        for tag, value in ifd_section.items():
+            # Get tag name from piexif's dictionary
+            tag_name = piexif.TAGS.get(ifd_name, {}).get(
+                tag, {"name": f"UnknownTag_{tag}"}
+            )["name"]
+
+            # Process value to be JSON serializable
+            if isinstance(value, bytes):
+                # Decode bytes, stripping null characters. Use latin-1 as a robust fallback.
+                processed_value = value.strip(b"\x00").decode("latin-1").strip()
+            elif (
+                isinstance(value, tuple) and len(value) == 2
+            ):  # For rational numbers (e.g., FNumber)
+                if value[1] != 0:
+                    # Represent as a string fraction and a rounded float for easy searching
+                    processed_value = (
+                        f"{value[0]}/{value[1]} ({round(value[0]/value[1], 2)})"
+                    )
+                else:
+                    processed_value = "0"
+            else:
+                processed_value = str(value)
+
+            flat_exif[tag_name] = processed_value
+    return flat_exif
 
 
 def hash_password(password):
@@ -81,9 +126,17 @@ def edit_photo(photo_id, gallery_frame, display_names_var):
         "Resolution Width": photo.resolution_width or "",
         "Resolution Height": photo.resolution_height or "",
         "Type": photo.type or "",
-        "Date of Creation (YYYY-MM-DD HH:MM:SS)": photo.date_of_creation.strftime("%Y-%m-%d %H:%M:%S") if photo.date_of_creation else "",
-        "Date of Archivisation (YYYY-MM-DD HH:MM:SS)": photo.date_of_archivisation.strftime("%Y-%m-%d %H:%M:%S") if photo.date_of_archivisation else "",
-        "EXIF (JSON string)": json.dumps(photo.exif) if photo.exif else "{}",
+        "Date of Creation (YYYY-MM-DD HH:MM:SS)": (
+            photo.date_of_creation.strftime("%Y-%m-%d %H:%M:%S")
+            if photo.date_of_creation
+            else ""
+        ),
+        "Date of Archivisation (YYYY-MM-DD HH:MM:SS)": (
+            photo.date_of_archivisation.strftime("%Y-%m-%d %H:%M:%S")
+            if photo.date_of_archivisation
+            else ""
+        ),
+        "EXIF (JSON string)": json.dumps(photo.exif, indent=2) if photo.exif else "{}",
         "Tags (comma-separated)": ", ".join([tag.name for tag in photo.tags]),
     }
 
@@ -93,11 +146,20 @@ def edit_photo(photo_id, gallery_frame, display_names_var):
     for idx, (label_text, value) in enumerate(fields.items()):
         lbl = tk.Label(edit_win, text=label_text)
         lbl.grid(row=idx, column=0, sticky="w", padx=5, pady=5)
-        ent = tk.Entry(edit_win, width=50)
+
+        if label_text == "EXIF (JSON string)":
+            ent = tk.Text(edit_win, width=60, height=10)
+            ent.insert("1.0", str(value))
+        else:
+            ent = tk.Entry(edit_win, width=60)
+            ent.insert(0, str(value))
+
         ent.grid(row=idx, column=1, padx=5, pady=5)
-        ent.insert(0, str(value))
         if label_text in readonly_fields:
-            ent.config(state='readonly')
+            if isinstance(ent, tk.Entry):
+                ent.config(state="readonly")
+            else:
+                ent.config(state="disabled")
         entries[label_text] = ent
 
     def save_changes():
@@ -116,10 +178,14 @@ def edit_photo(photo_id, gallery_frame, display_names_var):
                     messagebox.showerror("Error", f"Invalid date format: {dt_str}")
                     raise
 
-            photo.date_of_creation = parse_date(entries["Date of Creation (YYYY-MM-DD HH:MM:SS)"].get())
-            photo.date_of_archivisation = parse_date(entries["Date of Archivisation (YYYY-MM-DD HH:MM:SS)"].get())
+            photo.date_of_creation = parse_date(
+                entries["Date of Creation (YYYY-MM-DD HH:MM:SS)"].get()
+            )
+            photo.date_of_archivisation = parse_date(
+                entries["Date of Archivisation (YYYY-MM-DD HH:MM:SS)"].get()
+            )
 
-            exif_text = entries["EXIF (JSON string)"].get()
+            exif_text = entries["EXIF (JSON string)"].get("1.0", tk.END)
             if exif_text.strip():
                 photo.exif = json.loads(exif_text)
             else:
@@ -127,24 +193,26 @@ def edit_photo(photo_id, gallery_frame, display_names_var):
 
             # Handle tags
             tag_names_str = entries["Tags (comma-separated)"].get().strip()
-            new_tag_names = [name.strip() for name in tag_names_str.split(',') if name.strip()]
+            new_tag_names = [
+                name.strip() for name in tag_names_str.split(",") if name.strip()
+            ]
 
-            # Clear existing tags and re-add
             photo.tags.clear()
             for tag_name in new_tag_names:
-                # Try to find existing tag
                 tag = session.query(Tag).filter_by(name=tag_name).first()
                 if not tag:
-                    # If not found, create new tag
                     tag = Tag(name=tag_name)
-                    session.add(tag) # Add new tag to session
-                photo.tags.append(tag) # Associate tag with photo
+                    session.add(tag)
+                photo.tags.append(tag)
+
             session.commit()
             edit_win.destroy()
 
-            # Odśwież galerię
+            # Refresh gallery
             photos = session.query(Photo).options(selectinload(Photo.tags)).all()
-            update_gallery(gallery_frame, photos, display_names_var, gallery_frame.last_num_columns)
+            update_gallery(
+                gallery_frame, photos, display_names_var, gallery_frame.last_num_columns
+            )
 
         except Exception as e:
             session.rollback()
@@ -153,15 +221,18 @@ def edit_photo(photo_id, gallery_frame, display_names_var):
     btn_save = tk.Button(edit_win, text="Save Changes", command=save_changes)
     btn_save.grid(row=len(fields), column=0, columnspan=2, pady=10)
 
-    # Zamykanie sesji dopiero po zamknięciu okna edycji
     def on_close():
         session.close()
         edit_win.destroy()
 
     edit_win.protocol("WM_DELETE_WINDOW", on_close)
 
+
 def delete_photo(photo_id, gallery_frame, display_names_var):
-    if not messagebox.askyesno("Confirm Delete", "Are you sure you want to delete this photo? This action cannot be undone."):
+    if not messagebox.askyesno(
+        "Confirm Delete",
+        "Are you sure you want to delete this photo? This action cannot be undone.",
+    ):
         return
 
     session = Session()
@@ -172,31 +243,53 @@ def delete_photo(photo_id, gallery_frame, display_names_var):
             session.commit()
             # Refresh the gallery
             photos = session.query(Photo).options(selectinload(Photo.tags)).all()
-            update_gallery(gallery_frame, photos, display_names_var, gallery_frame.last_num_columns)
+            update_gallery(
+                gallery_frame, photos, display_names_var, gallery_frame.last_num_columns
+            )
     except Exception as e:
         session.rollback()
         messagebox.showerror("Error", f"Failed to delete photo: {str(e)}")
     finally:
         session.close()
 
-def save_item(name):
-    pass # This function seems to be a placeholder and not used for actual saving.
 
-
-def search_photos(search_term):
+def filter_photos(search_term=None, exif_key=None, exif_value=None):
+    """
+    Filters photos based on a general search term and/or specific EXIF data.
+    """
     session = Session()
     try:
-        results = (
-            session.query(Photo)
-            .options(selectinload(Photo.tags))
-            .filter(
-                (Photo.path.ilike(f"%{search_term}%")) |
-                (Photo.author.ilike(f"%{search_term}%")) |
-                (Photo.tags.any(Tag.name.ilike(f"%{search_term}%")))
+        query = session.query(Photo).options(selectinload(Photo.tags))
+
+        # Apply text search filter
+        if search_term and search_term.strip():
+            term = f"%{search_term.strip()}%"
+            query = query.filter(
+                (Photo.path.ilike(term))
+                | (Photo.author.ilike(term))
+                | (Photo.tags.any(Tag.name.ilike(term)))
             )
-            .all()
+
+        # Apply EXIF filter
+        if exif_key and exif_key.strip():
+            # This SQLAlchemy syntax safely queries the JSONB/JSON column.
+            # It checks if the key exists...
+            query = query.filter(Photo.exif[exif_key.strip()].isnot(None))
+            # ...and if a value is provided, it checks if the value matches (case-insensitive).
+            if exif_value is not None and exif_value.strip():
+                query = query.filter(
+                    Photo.exif[exif_key.strip()]
+                    .as_string()
+                    .ilike(f"%{exif_value.strip()}%")
+                )
+
+        return query.all()
+    except Exception as e:
+        messagebox.showerror(
+            "Filter Error",
+            f"An error occurred during filtering: {e}\nNote: EXIF key might be case-sensitive.",
         )
-        return results
+        return []
     finally:
         session.close()
 
@@ -204,41 +297,45 @@ def search_photos(search_term):
 def add_photo(gallery_frame, display_names_var):
     file_path = filedialog.askopenfilename(
         title="Select a photo",
-        filetypes=[("Image Files", "*.jpg *.jpeg *.png *.gif *.bmp")]
+        filetypes=[("Image Files", "*.jpg *.jpeg *.png *.gif *.bmp")],
     )
     if not file_path:
         return
+
+    exif_dict_for_db = {}
     author = None
+    date_of_creation = None
+
     try:
         img = Image.open(file_path)
-        if "exif" in img.info:
-            exif_data = piexif.load(img.info["exif"])
-            if piexif.ImageIFD.Artist in exif_data["0th"]:
-                author = exif_data["0th"][piexif.ImageIFD.Artist].decode('utf-8')
-                print(f"Autor: {author}")
-        else:
-            exif_data = {}
         size = os.path.getsize(file_path)
         resolution_width, resolution_height = img.size
         image_type = img.format
+
+        # Correctly read and process EXIF data
+        if "exif" in img.info and img.info["exif"]:
+            raw_exif = piexif.load(img.info["exif"])
+            exif_dict_for_db = process_exif_for_db(raw_exif)
+
+            author = exif_dict_for_db.get("Artist")
+            date_str = exif_dict_for_db.get("DateTimeOriginal") or exif_dict_for_db.get(
+                "DateTime"
+            )
+            if date_str:
+                try:
+                    # piexif format is 'YYYY:MM:DD HH:MM:SS'
+                    date_of_creation = datetime.datetime.strptime(
+                        date_str, "%Y:%m:%d %H:%M:%S"
+                    )
+                except ValueError:
+                    # Handle if format is different, fallback to None
+                    date_of_creation = None
+
     except Exception as e:
-        messagebox.showerror("Error", f"Nie udało się odczytać obrazu: {str(e)}")
+        messagebox.showerror("Error", f"Could not read image or its metadata: {str(e)}")
         return
-    try:
-        date_of_creation_str = exif_data.get("0th", {}).get(piexif.ImageIFD.DateTime, None)
-        if date_of_creation_str:
-            date_of_creation_str = date_of_creation_str.decode('utf-8')
-            date_of_creation = datetime.datetime.strptime(date_of_creation_str, "%Y:%m:%d %H:%M:%S")
-        else:
-            date_of_creation = None
-    except Exception as e:
-        date_of_creation = None
-    
-    print(exif_data)
-    exif_data = {}
+
     session = Session()
-    if not author:
-        author = None
     try:
         new_photo = Photo(
             path=file_path,
@@ -246,18 +343,23 @@ def add_photo(gallery_frame, display_names_var):
             attr_size=size,
             resolution_width=resolution_width,
             resolution_height=resolution_height,
-            exif=exif_data,
+            exif=exif_dict_for_db,  # Save the processed, queryable EXIF data
             date_of_creation=date_of_creation,
             date_of_archivisation=datetime.datetime.now(),
-            type=image_type
+            type=image_type,
         )
         session.add(new_photo)
         session.commit()
+        # Refresh gallery to show the new photo
         photos = session.query(Photo).options(selectinload(Photo.tags)).all()
-        update_gallery(gallery_frame, photos, display_names_var, gallery_frame.last_num_columns)
+        update_gallery(
+            gallery_frame, photos, display_names_var, gallery_frame.last_num_columns
+        )
     except Exception as e:
         session.rollback()
-        messagebox.showerror("Error", f"An error occurred while adding photo: {str(e)}")
+        messagebox.showerror(
+            "Error", f"An error occurred while adding photo to database: {str(e)}"
+        )
     finally:
         session.close()
 
@@ -271,7 +373,6 @@ def update_gallery(gallery_frame, photos, display_names_var, max_columns):
     gallery_frame.last_num_columns = max_columns
     col = 0
     row = 0
-    
 
     for idx, photo in enumerate(photos):
         card = tk.Frame(gallery_frame, bd=1, relief=tk.RIDGE, padx=10, pady=10)
@@ -293,30 +394,57 @@ def update_gallery(gallery_frame, photos, display_names_var, max_columns):
             tooltip_text = f"Size: {photo.attr_size} bytes\nResolution: {photo.resolution_width}x{photo.resolution_height}"
             ToolTip(img_label, tooltip_text)
         else:
-            placeholder = tk.Label(card, text="No preview", width=25, height=6, bg="gray80")
+            placeholder = tk.Label(
+                card, text="No preview", width=25, height=6, bg="gray80"
+            )
             placeholder.pack()
 
         file_name_only = os.path.basename(photo.path)
         title = tk.Label(card, text=file_name_only, font=("Arial", 12, "bold"))
-        if display_names_var.get(): # Conditionally pack the title label
+        if display_names_var.get():  # Conditionally pack the title label
             title.pack(pady=(10, 0))
-        description = tk.Label(card, text=f"Author: {photo.author if photo.author else 'N/A'}", wraplength=200, justify="center")
+        description = tk.Label(
+            card,
+            text=f"Author: {photo.author if photo.author else 'N/A'}",
+            wraplength=200,
+            justify="center",
+        )
         description.pack()
-        
+
         tags_text = ", ".join([tag.name for tag in photo.tags])
         if tags_text:
-            tags_label = tk.Label(card, text=f"Tags: {tags_text}", wraplength=200, justify="center", fg="blue")
+            tags_label = tk.Label(
+                card,
+                text=f"Tags: {tags_text}",
+                wraplength=200,
+                justify="center",
+                fg="blue",
+            )
             tags_label.pack()
 
         # Frame for buttons to align them left and right
         button_frame = tk.Frame(card)
         button_frame.pack(fill=tk.X, pady=5)
 
-        edit_btn = tk.Button(button_frame, text="Edit", command=lambda p_id=photo.id: edit_photo(p_id, gallery_frame, display_names_var))
+        edit_btn = tk.Button(
+            button_frame,
+            text="Edit",
+            command=lambda p_id=photo.id: edit_photo(
+                p_id, gallery_frame, display_names_var
+            ),
+        )
         edit_btn.pack(side=tk.LEFT)
         ToolTip(edit_btn, "Edit this photo's details")
 
-        delete_btn = tk.Button(button_frame, text="Delete", bg="#e74c3c", fg="white", command=lambda p_id=photo.id: delete_photo(p_id, gallery_frame, display_names_var))
+        delete_btn = tk.Button(
+            button_frame,
+            text="Delete",
+            bg="#e74c3c",
+            fg="white",
+            command=lambda p_id=photo.id: delete_photo(
+                p_id, gallery_frame, display_names_var
+            ),
+        )
         delete_btn.pack(side=tk.RIGHT)
         ToolTip(delete_btn, "Delete this photo from the collection")
 
@@ -327,23 +455,33 @@ def update_gallery(gallery_frame, photos, display_names_var, max_columns):
 
 
 def generate_report(gallery_frame):
-
     photos = getattr(gallery_frame, "visible_photos", [])
     if not photos:
-        messagebox.showwarning("No Photos", "There are no photos to include in the report.")
+        messagebox.showwarning(
+            "No Photos", "There are no photos to include in the report."
+        )
         return
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    pdf.add_font("ArialUnicode", "", "arial.ttf", uni=True)
-    pdf.set_font("ArialUnicode", size=12)
+    # Add a font that supports a wide range of characters
+    try:
+        pdf.add_font("ArialUnicode", "", "arial.ttf", uni=True)
+        pdf.set_font("ArialUnicode", size=12)
+    except RuntimeError:
+        messagebox.showwarning(
+            "Font Error",
+            "arial.ttf not found. Report text may not render correctly. Please place arial.ttf in the script directory.",
+        )
+        pdf.set_font("Arial", size=12)
 
-    pdf.cell(200, 10, txt="Photo Collection Report", ln=True, align='C')
+    pdf.cell(200, 10, txt="Photo Collection Report", ln=True, align="C")
     pdf.ln(10)
 
     for photo in photos:
+        pdf.add_page()
         try:
             img = Image.open(photo.path)
             img.thumbnail((150, 150))
@@ -355,21 +493,35 @@ def generate_report(gallery_frame):
         except Exception as e:
             pdf.cell(0, 10, txt=f"[Could not load image: {e}]", ln=True)
 
-        pdf.cell(0, 10, f"Path: {photo.path}", ln=True)
-        pdf.cell(0, 10, f"Author: {photo.author if photo.author else 'N/A'}", ln=True)
-        pdf.cell(0, 10, f"Size: {photo.attr_size} bytes", ln=True)
-        pdf.cell(0, 10, f"Resolution: {photo.resolution_width}x{photo.resolution_height}", ln=True)
-        pdf.cell(0, 10, f"Type: {photo.type if photo.type else 'N/A'}", ln=True)
-        pdf.cell(0, 10, f"Date of Creation: {photo.date_of_creation.strftime('%Y-%m-%d %H:%M:%S') if photo.date_of_creation else 'N/A'}", ln=True)
-        pdf.cell(0, 10, f"Date of Archivisation: {photo.date_of_archivisation.strftime('%Y-%m-%d %H:%M:%S') if photo.date_of_archivisation else 'N/A'}", ln=True)
-        pdf.ln(10)
+        # Use write() for better handling of non-ASCII characters if font supports it
+        pdf.write(5, f"Path: {photo.path}\n")
+        pdf.write(5, f"Author: {photo.author if photo.author else 'N/A'}\n")
+        pdf.write(5, f"Size: {photo.attr_size} bytes\n")
+        pdf.write(
+            5, f"Resolution: {photo.resolution_width}x{photo.resolution_height}\n"
+        )
+        pdf.write(5, f"Type: {photo.type if photo.type else 'N/A'}\n")
+        pdf.write(
+            5,
+            f"Date of Creation: {photo.date_of_creation.strftime('%Y-%m-%d %H:%M:%S') if photo.date_of_creation else 'N/A'}\n",
+        )
+        pdf.write(
+            5,
+            f"Date of Archivisation: {photo.date_of_archivisation.strftime('%Y-%m-%d %H:%M:%S') if photo.date_of_archivisation else 'N/A'}\n",
+        )
+
+        # Add EXIF data to the report
+        if photo.exif:
+            pdf.ln(5)
+            pdf.set_font("", "B", size=10)
+            pdf.write(5, "EXIF Data:\n")
+            pdf.set_font("", size=8)
+            exif_str = json.dumps(photo.exif, indent=2)
+            pdf.multi_cell(0, 5, exif_str)
 
     output_path = "photo_collection_report.pdf"
     pdf.output(output_path)
     messagebox.showinfo("Report Generated", f"Report saved as {output_path}")
-
-
-
 
 
 def open_main_window(username):
@@ -390,31 +542,91 @@ def open_main_window(username):
     )
     header_label.pack(pady=15)
 
-    top_frame = tk.Frame(main_window)
-    top_frame.pack()
+    # === Main Controls Frame (Add, Report, Display) ===
+    top_controls_frame = tk.Frame(main_window)
+    top_controls_frame.pack(fill="x", padx=10, pady=5)
 
-    search_frame = tk.Frame(main_window)
-    search_frame.pack(pady=20)
+    add_button = tk.Button(
+        top_controls_frame,
+        text="Add Photo",
+        bg="lightblue",
+        padx=10,
+        command=lambda: add_photo(gallery, display_names_var),
+    )
+    add_button.pack(side=tk.LEFT, padx=10, pady=10)
+    ToolTip(add_button, "Click to add a new photo to your collection.")
 
-    search_entry = tk.Entry(search_frame, width=40)
-    search_entry.insert(0, "Search photos...")
-    search_entry.pack(side=tk.LEFT, padx=5)
-    ToolTip(search_entry, "Type a keyword and press Enter to search.")
+    report_button = tk.Button(
+        top_controls_frame,
+        text="Generate Report",
+        bg="lightblue",
+        padx=10,
+        command=lambda: generate_report(gallery),
+    )
+    report_button.pack(side=tk.LEFT)
+    ToolTip(report_button, "Generate a report of all currently visible photos.")
 
-    search_entry.bind("<FocusIn>", lambda e: search_entry.delete(0, tk.END) if search_entry.get() == "Search photos..." else None)
-    search_entry.bind("<FocusOut>", lambda e: search_entry.insert(0, "Search photos...") if not search_entry.get() else None)
+    display_names_var = tk.BooleanVar(value=True)
+    display_names_check = tk.Checkbutton(
+        top_controls_frame,
+        text="Show Photo Names",
+        variable=display_names_var,
+        command=lambda: update_gallery(
+            gallery, gallery.visible_photos, display_names_var, gallery.last_num_columns
+        ),
+    )
+    display_names_check.pack(side=tk.LEFT, padx=10, pady=10)
 
-    def on_search():
-        term = search_entry.get().strip()
-        results = search_photos(term)
+    # === Filter and Search Controls Frame ===
+    filter_frame = tk.Frame(main_window, bd=1, relief=tk.GROOVE)
+    filter_frame.pack(pady=10, padx=10, fill="x")
+
+    # Text search
+    tk.Label(filter_frame, text="Search Term:").pack(side=tk.LEFT, padx=(5, 2))
+    search_term_entry = tk.Entry(filter_frame, width=30)
+    search_term_entry.pack(side=tk.LEFT, padx=(0, 10))
+    ToolTip(search_term_entry, "Search by path, author, or tag.")
+
+    # EXIF Filter
+    tk.Label(filter_frame, text="EXIF Key:").pack(side=tk.LEFT, padx=(10, 2))
+    exif_key_entry = tk.Entry(filter_frame, width=20)
+    exif_key_entry.pack(side=tk.LEFT)
+    ToolTip(exif_key_entry, "e.g., 'Make', 'Model', 'FNumber', 'LensModel'")
+
+    tk.Label(filter_frame, text="EXIF Value:").pack(side=tk.LEFT, padx=(10, 2))
+    exif_value_entry = tk.Entry(filter_frame, width=20)
+    exif_value_entry.pack(side=tk.LEFT)
+    ToolTip(exif_value_entry, "e.g., 'Canon', '1.8', 'ILCE-7M3'")
+
+    def apply_filters():
+        search_term = search_term_entry.get()
+        exif_key = exif_key_entry.get()
+        exif_value = exif_value_entry.get()
+        results = filter_photos(
+            search_term=search_term, exif_key=exif_key, exif_value=exif_value
+        )
         update_gallery(gallery, results, display_names_var, gallery.last_num_columns)
 
-    search_entry.bind("<Return>", lambda e: on_search())
+    def clear_all_filters():
+        search_term_entry.delete(0, tk.END)
+        exif_key_entry.delete(0, tk.END)
+        exif_value_entry.delete(0, tk.END)
+        session = Session()
+        try:
+            all_photos = session.query(Photo).options(selectinload(Photo.tags)).all()
+            update_gallery(
+                gallery, all_photos, display_names_var, gallery.last_num_columns
+            )
+        finally:
+            session.close()
 
-    search_button = tk.Button(search_frame, text="Search", command=on_search)
-    search_button.pack(side=tk.LEFT)
-    ToolTip(search_button, "Click to perform search.")
+    apply_button = tk.Button(filter_frame, text="Apply Filters", command=apply_filters)
+    apply_button.pack(side=tk.LEFT, padx=10)
 
+    clear_button = tk.Button(filter_frame, text="Clear", command=clear_all_filters)
+    clear_button.pack(side=tk.LEFT)
+
+    # === Gallery Display with Scrollbar ===
     container = tk.Frame(main_window)
     container.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -428,51 +640,34 @@ def open_main_window(username):
     gallery = tk.Frame(canvas, bg="#f5f5f5")
     canvas.create_window((0, 0), window=gallery, anchor="nw")
 
-    # This function handles the scroll region for the canvas
     def on_frame_configure(event):
         canvas.configure(scrollregion=canvas.bbox("all"))
+
     gallery.bind("<Configure>", on_frame_configure)
 
-    # This function handles the responsive layout when the canvas is resized
     def on_canvas_configure(event):
         canvas_width = event.width
-        # Estimate card width: image (250px) + card padx (20) + grid padx (20) + borders (~5) = ~295px
-        # Using a slightly larger value to ensure there's enough margin.
         card_width_estimate = 300
         num_columns = max(1, canvas_width // card_width_estimate)
+        if getattr(gallery, "last_num_columns", 0) != num_columns:
+            update_gallery(
+                gallery, gallery.visible_photos, display_names_var, num_columns
+            )
 
-        # Redraw gallery only if the number of columns has changed
-        if getattr(gallery, 'last_num_columns', 0) != num_columns:
-            update_gallery(gallery, gallery.visible_photos, display_names_var, num_columns)
     canvas.bind("<Configure>", on_canvas_configure)
 
-    add_button = tk.Button(top_frame, text="Add Photo", bg="lightblue", padx=10, command=lambda: add_photo(gallery, display_names_var))
-    add_button.pack(side=tk.LEFT, padx=10, pady=10)
-    ToolTip(add_button, "Click to add a new photo to your collection.")
-
-    report_button = tk.Button(top_frame, text="Generate Report", bg="lightblue", padx=10, command=lambda: generate_report(gallery))
-    report_button.pack(side=tk.LEFT)
-    ToolTip(report_button, "Generate a report of all saved photos.")
-
-    # Checkbutton for displaying photo names
-    display_names_var = tk.BooleanVar(value=True) # Default to True (show names)
-    display_names_check = tk.Checkbutton(
-        top_frame,
-        text="Show Photo Names",
-        variable=display_names_var,
-        command=lambda: update_gallery(gallery, gallery.visible_photos, display_names_var, gallery.last_num_columns)
-    )
-    display_names_check.pack(side=tk.LEFT, padx=10, pady=10)
-
+    # Initial data load
     session = Session()
     try:
         all_photos = session.query(Photo).options(selectinload(Photo.tags)).all()
     except Exception as e:
-        messagebox.showerror("Error", f"An error occurred while fetching photos: {str(e)}")
+        messagebox.showerror(
+            "Error", f"An error occurred while fetching photos: {str(e)}"
+        )
         all_photos = []
     finally:
-        session.close() # Close session after fetching all photos
-    # Initial call with a default of 1 column, the <Configure> event will fix it immediately
+        session.close()
+
     update_gallery(gallery, all_photos, display_names_var, 1)
 
     footer = tk.Label(
@@ -537,69 +732,73 @@ def register():
         session.close()
 
 
-init_db()
+# === Main Application Start ===
+if __name__ == "__main__":
+    init_db()
 
-root = tk.Tk()
-root.title("Photo Collection Management System")
-root.geometry("900x600")
-root.configure(bg="#f5f5f5")
+    root = tk.Tk()
+    root.title("Photo Collection Management System")
+    root.geometry("900x600")
+    root.configure(bg="#f5f5f5")
 
-header = tk.Frame(root, bg="#2c3e50", height=60)
-header.pack(fill="x")
-header_label = tk.Label(
-    header,
-    text="Photo Collection Management System",
-    bg="#2c3e50",
-    fg="white",
-    font=("Helvetica", 16, "bold"),
-)
-header_label.pack(pady=15)
+    header = tk.Frame(root, bg="#2c3e50", height=60)
+    header.pack(fill="x")
+    header_label = tk.Label(
+        header,
+        text="Photo Collection Management System",
+        bg="#2c3e50",
+        fg="white",
+        font=("Helvetica", 16, "bold"),
+    )
+    header_label.pack(pady=15)
 
-form_frame = tk.Frame(root, bg="white", padx=30, pady=30, relief="solid", bd=1)
-form_frame.place(relx=0.5, rely=0.5, anchor="center")
+    form_frame = tk.Frame(root, bg="white", padx=30, pady=30, relief="solid", bd=1)
+    form_frame.place(relx=0.5, rely=0.5, anchor="center")
 
-label_login = tk.Label(form_frame, text="Login", bg="white", font=("Helvetica", 14, "bold"))
-label_login.pack(pady=(0, 20))
+    label_login = tk.Label(
+        form_frame, text="Login", bg="white", font=("Helvetica", 14, "bold")
+    )
+    label_login.pack(pady=(0, 20))
 
-label_username = tk.Label(form_frame, text="Username:", bg="white")
-label_username.pack(anchor="w")
-entry_username = tk.Entry(form_frame, width=30)
-entry_username.pack(pady=(0, 15))
-ToolTip(entry_username, "Enter your username.")
+    label_username = tk.Label(form_frame, text="Username:", bg="white")
+    label_username.pack(anchor="w")
+    entry_username = tk.Entry(form_frame, width=30)
+    entry_username.pack(pady=(0, 15))
+    ToolTip(entry_username, "Enter your username.")
 
-label_password = tk.Label(form_frame, text="Password:", bg="white")
-label_password.pack(anchor="w")
-entry_password = tk.Entry(form_frame, show="*", width=30)
-entry_password.pack(pady=(0, 20))
-ToolTip(entry_password, "Enter your password.")
+    label_password = tk.Label(form_frame, text="Password:", bg="white")
+    label_password.pack(anchor="w")
+    entry_password = tk.Entry(form_frame, show="*", width=30)
+    entry_password.pack(pady=(0, 20))
+    ToolTip(entry_password, "Enter your password.")
 
-btn_frame = tk.Frame(form_frame, bg="white")
-btn_frame.pack()
+    btn_frame = tk.Frame(form_frame, bg="white")
+    btn_frame.pack()
 
-login_btn = tk.Button(
-    btn_frame,
-    text="Login",
-    bg="#3498db",
-    fg="white",
-    padx=10,
-    pady=5,
-    width=12,
-    command=login,
-)
-login_btn.pack(side="left", padx=5)
-ToolTip(login_btn, "Click to log into your account.")
+    login_btn = tk.Button(
+        btn_frame,
+        text="Login",
+        bg="#3498db",
+        fg="white",
+        padx=10,
+        pady=5,
+        width=12,
+        command=login,
+    )
+    login_btn.pack(side="left", padx=5)
+    ToolTip(login_btn, "Click to log into your account.")
 
-register_btn = tk.Button(
-    btn_frame,
-    text="Register",
-    bg="#2ecc71",
-    fg="white",
-    padx=10,
-    pady=5,
-    width=12,
-    command=register,
-)
-register_btn.pack(side="right", padx=5)
-ToolTip(register_btn, "Click to create a new account.")
+    register_btn = tk.Button(
+        btn_frame,
+        text="Register",
+        bg="#2ecc71",
+        fg="white",
+        padx=10,
+        pady=5,
+        width=12,
+        command=register,
+    )
+    register_btn.pack(side="right", padx=5)
+    ToolTip(register_btn, "Click to create a new account.")
 
-root.mainloop()
+    root.mainloop()
